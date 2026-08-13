@@ -6,8 +6,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 const TOKEN =
-    process.env.LEXINX_TOKEN || "LEXINX_nigga_7826e7277jf83836w!882LEXINX_nigga_7826e7277jf83836w!882LEXINX_nigga_7826e7277jf83836w!882LEXINX_nigga_7826e7277jf83836w!882";
-
+    process.env.LEXINX_TOKEN || "CHANCE_ME"
 const PAYLOAD = String.raw`
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
