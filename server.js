@@ -1,328 +1,618 @@
+"use strict";
+
 const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
-app.use(express.json());
+
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
+
+app.use(express.json({
+limit: "1kb",
+strict: true
+}));
+
+// ============================================================
+// CONFIG
+// ============================================================
 
 const PORT = process.env.PORT || 3000;
+const SERVER_SECRET = process.env.LEXINX_SECRET;
 
-const TOKEN =
-    process.env.LEXINX_TOKEN || "CHANGE_ME";
+if (!SERVER_SECRET || SERVER_SECRET.length < 32) {
+throw new Error(
+"LEXINX_SECRET must be at least 32 characters"
+);
+}
 
-const PAYLOAD = String.raw`
-local Players = game:GetService("Players")
+const VERSION = "V50";
+
+const NONCE_TTL = 60_000;
+const SESSION_TTL = 30_000;
+
+const RATE_WINDOW = 60_000;
+const MAX_REQUESTS = 20;
+const MAX_FAILURES = 5;
+const LOCK_TIME = 300_000;
+
+// ============================================================
+// MEMORY
+// ============================================================
+
+const nonces = new Map();
+const sessions = new Map();
+const clients = new Map();
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function now() {
+return Date.now();
+}
+
+function unix() {
+return Math.floor(now() / 1000);
+}
+
+function getIP(req) {
+return (
+req.headers["cf-connecting-ip"] ||
+req.headers["x-real-ip"] ||
+req.ip ||
+req.socket.remoteAddress ||
+"unknown"
+);
+}
+
+function blocked(res) {
+return res
+.status(403)
+.type("text/plain")
+.send("Blocked by LEXINX v50 protection");
+}
+
+function clientState(ip) {
+let state = clients.get(ip);
+
+if (!state) {  
+    state = {  
+        window: now(),  
+        requests: 0,  
+        failures: 0,  
+        lockedUntil: 0  
+    };  
+
+    clients.set(ip, state);  
+}  
+
+return state;
+
+}
+
+// ============================================================
+// RATE LIMIT
+// ============================================================
+
+function checkRate(req) {
+const state = clientState(getIP(req));
+
+if (state.lockedUntil > now()) {  
+    return false;  
+}  
+
+if (now() - state.window > RATE_WINDOW) {  
+    state.window = now();  
+    state.requests = 0;  
+}  
+
+state.requests++;  
+
+if (state.requests > MAX_REQUESTS) {  
+    state.lockedUntil =  
+        now() + LOCK_TIME;  
+
+    return false;  
+}  
+
+return true;
+
+}
+
+// ============================================================
+// FAILURE
+// ============================================================
+
+function failure(req) {
+const state = clientState(getIP(req));
+
+state.failures++;  
+
+if (state.failures >= MAX_FAILURES) {  
+    state.lockedUntil =  
+        now() + LOCK_TIME;  
+}
+
+}
+
+// ============================================================
+// NONCE
+// ============================================================
+
+function validNonce(nonce) {
+return (
+typeof nonce === "string" &&
+/^[A-Za-z0-9]{32}$/.test(nonce)
+);
+}
+
+// ============================================================
+// TIMESTAMP
+// ============================================================
+
+function validTimestamp(value) {
+if (
+typeof value !== "string" ||
+!/^\d{10}$/.test(value)
+) {
+return false;
+}
+
+const timestamp = Number(value);  
+
+if (!Number.isSafeInteger(timestamp)) {  
+    return false;  
+}  
+
+return (  
+    Math.abs(unix() - timestamp) <= 30  
+);
+
+}
+
+// ============================================================
+// SESSION
+// ============================================================
+
+function createSession(ip) {
+
+const session =  
+    crypto  
+        .randomBytes(32)  
+        .toString("hex");  
+
+sessions.set(session, {  
+    ip,  
+    created: now(),  
+    expires: now() + SESSION_TTL,  
+    version: VERSION  
+});  
+
+return session;
+
+}
+
+// ============================================================
+// HOME
+// ============================================================
+
+app.get("/", (req, res) => {
+res
+.type("text/plain")
+.send("cc");
+});
+
+// ============================================================
+// PUBLIC LOADER
+// ============================================================
+
+app.get(
+"/api/LEXINX_nigga_7826e7277jf83836w!882",
+(req, res) => {
+
+/*  
+     * Đây KHÔNG phải payload thật.  
+     * Chỉ là bootstrap tối thiểu.  
+     */  
+
+    const loader = `
+
 local HttpService = game:GetService("HttpService")
 
 local API =
-    "https://l3xinx-api.onrender.com/api/sound"
+"https://l3xinx-api.onrender.com/api/sound"
 
-local TOKEN =
-    "CHANGE_ME"
+local VERSION = "V50"
 
 local function nonce()
-    local chars =
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-    local result = {}
+local chars =  
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"  
 
-    for i = 1, 32 do
-        local n =
-            math.random(1, #chars)
+local result = {}  
 
-        result[i] =
-            chars:sub(n, n)
-    end
+for i = 1, 32 do  
 
-    return table.concat(result)
+    local n =  
+        math.random(  
+            1,  
+            #chars  
+        )  
+
+    result[i] =  
+        chars:sub(  
+            n,  
+            n  
+        )  
+end  
+
+return table.concat(result)
+
 end
 
-local ok, response =
-    pcall(function()
+local response
 
-        return request({
-            Url = API,
-            Method = "POST",
+local ok = pcall(function()
 
-            Headers = {
-                ["Content-Type"] =
-                    "application/json",
+response = request({  
 
-                ["X-Token"] =
-                    TOKEN,
+    Url = API,  
 
-                ["X-Time"] =
-                    tostring(os.time()),
+    Method = "POST",  
 
-                ["X-Nonce"] =
-                    nonce()
-            },
+    Headers = {  
 
-            Body = "{}"
-        })
+        ["Content-Type"] =  
+            "application/json",  
 
-    end)
+        ["X-Time"] =  
+            tostring(os.time()),  
+
+        ["X-Nonce"] =  
+            nonce(),  
+
+        ["X-Version"] =  
+            VERSION  
+    },  
+
+    Body = "{}"  
+})
+
+end)
 
 if not ok or
-   not response or
-   response.StatusCode ~= 200 then
+not response or
+response.StatusCode ~= 200 then
 
-    warn("LEXINX BLOCK")
-    return
+warn("[LEXINX] BLOCK")  
+return
+
 end
 
-local success, data =
-    pcall(function()
+local decoded, data =
+pcall(function()
 
-        return HttpService:JSONDecode(
-            response.Body
-        )
+return HttpService:JSONDecode(  
+        response.Body  
+    )  
 
-    end)
-
-if not success or
-   type(data) ~= "table" or
-   data.ok ~= true then
-
-    warn("Authentication failed")
-    return
-end
-
-local player =
-    Players.LocalPlayer
-
-local character =
-    player.Character
-    or player.CharacterAdded:Wait()
-
-local root =
-    character:WaitForChild(
-        "HumanoidRootPart"
-    )
-
-local sound =
-    Instance.new("Sound")
-
-sound.SoundId =
-    "rbxassetid://"
-    .. tostring(data.soundId)
-
-sound.Volume =
-    tonumber(data.volume) or 4
-
-sound.PlaybackSpeed =
-    tonumber(data.speed) or 0.2
-
-sound.Parent =
-    root
-
-sound:Play()
-
-sound.Ended:Once(function()
-    sound:Destroy()
 end)
+
+if not decoded or
+type(data) ~= "table" or
+data.ok ~= true then
+
+warn("[LEXINX] AUTH FAILED")  
+return
+
+end
+
+if data.version ~= VERSION then
+
+warn("[LEXINX] VERSION FAILED")  
+return
+
+end
+
+print("[LEXINX] Authorized")
+
+-- Chỉ nhận dữ liệu cần thiết.
+print("Sound:", data.config.soundId)
 `;
 
+res  
+        .status(200)  
+        .type("text/plain")  
+        .send(loader);  
+}
 
-// ======================================
-// PUBLIC HOME
-// ======================================
+);
 
-app.get("/", (req, res) => {
-    res.type("text").send("cc");
-});
-
-
-// ======================================
-// PAYLOAD
-// ======================================
+// ============================================================
+// BLOCK DIRECT GET
+// ============================================================
 
 app.get(
-    "/api/827e82jx828282js",
-    (req, res) => {
-
-        res
-            .type("text/plain")
-            .send(PAYLOAD);
-    }
+"/api/session",
+(req, res) => blocked(res)
 );
 
-
-// ======================================
-// SOUND API
-// ======================================
-
-const usedNonces =
-    new Map();
+// ============================================================
+// SESSION AUTH
+// ============================================================
 
 app.post(
-    "/api/sound",
-    (req, res) => {
+"/api/session",
+(req, res) => {
 
-        const token =
-            req.header("X-Token");
+// Rate limit  
+    if (!checkRate(req)) {  
+        return blocked(res);  
+    }  
 
-        const timestamp =
-            Number(req.header("X-Time"));
+    // Content-Type  
+    const contentType =  
+        req.headers["content-type"] || "";  
 
-        const nonce =
-            req.header("X-Nonce");
+    if (  
+        !contentType  
+            .toLowerCase()  
+            .startsWith("application/json")  
+    ) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
+    // Headers  
+    const timestamp =  
+        req.header("X-Time");  
 
-        // TOKEN
-        if (token !== TOKEN) {
+    const nonce =  
+        req.header("X-Nonce");  
 
-            return res
-                .status(403)
-                .json({
-                    ok: false,
-                    error: "BLOCKED"
-                });
-        }
+    const version =  
+        req.header("X-Version");  
 
+    if (  
+        !timestamp ||  
+        !nonce ||  
+        !version  
+    ) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
-        // TIMESTAMP
-        if (!timestamp) {
+    // Version  
+    if (version !== VERSION) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
-            return res
-                .status(400)
-                .json({
-                    ok: false,
-                    error: "INVALID_TIME"
-                });
-        }
+    // Timestamp  
+    if (!validTimestamp(timestamp)) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
+    // Nonce format  
+    if (!validNonce(nonce)) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
-        const now =
-            Math.floor(
-                Date.now() / 1000
-            );
+    // Replay protection  
+    if (nonces.has(nonce)) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
+    nonces.set(  
+        nonce,  
+        now()  
+    );  
 
-        if (
-            Math.abs(
-                now - timestamp
-            ) > 60
-        ) {
+    // Body must be {}  
+    if (  
+        !req.body ||  
+        typeof req.body !== "object" ||  
+        Array.isArray(req.body) ||  
+        Object.keys(req.body).length !== 0  
+    ) {  
+        failure(req);  
+        return blocked(res);  
+    }  
 
-            return res
-                .status(401)
-                .json({
-                    ok: false,
-                    error: "EXPIRED"
-                });
-        }
+    // Create session  
+    const session =  
+        createSession(  
+            getIP(req)  
+        );  
 
+    // ====================================================  
+    // RESPONSE  
+    // ====================================================  
 
-        // NONCE
-        if (
-            typeof nonce !== "string" ||
-            nonce.length < 16
-        ) {
+    return res.json({  
 
-            return res
-                .status(400)
-                .json({
-                    ok: false,
-                    error: "INVALID_NONCE"
-                });
-        }
+        ok: true,  
 
+        version: VERSION,  
 
-        // REPLAY
-        if (
-            usedNonces.has(nonce)
-        ) {
+        session,  
 
-            return res
-                .status(409)
-                .json({
-                    ok: false,
-                    error: "REPLAY"
-                });
-        }
+        expiresIn:  
+            SESSION_TTL,  
 
+        config: {  
 
-        usedNonces.set(
-            nonce,
-            Date.now()
-        );
+            soundId:  
+                132545213997354,  
 
+            volume: 4,  
 
-        // PAYLOAD DATA
-        res.json({
-            ok: true,
+            speed: 0.2  
+        }  
+    });  
+}
 
-            version: "V50",
-
-            soundId:
-                132545213997354,
-
-            volume:
-                4,
-
-            speed:
-                0.2
-        });
-    }
 );
 
+// ============================================================
+// CONFIG
+// ============================================================
 
-// ======================================
-// CLEANUP NONCES
-// ======================================
+app.post(
+"/api/config",
+(req, res) => {
+
+if (!checkRate(req)) {  
+        return blocked(res);  
+    }  
+
+    const session =  
+        req.header("X-Session");  
+
+    if (  
+        typeof session !== "string"  
+    ) {  
+        failure(req);  
+        return blocked(res);  
+    }  
+
+    const record =  
+        sessions.get(session);  
+
+    if (!record) {  
+        failure(req);  
+        return blocked(res);  
+    }  
+
+    if (  
+        record.expires <= now()  
+    ) {  
+        sessions.delete(session);  
+        return blocked(res);  
+    }  
+
+    // Bind session to IP  
+    if (  
+        record.ip !== getIP(req)  
+    ) {  
+        failure(req);  
+        return blocked(res);  
+    }  
+
+    if (  
+        record.version !== VERSION  
+    ) {  
+        return blocked(res);  
+    }  
+
+    return res.json({  
+
+        ok: true,  
+
+        version: VERSION,  
+
+        config: {  
+
+            soundId:  
+                132545213997354,  
+
+            volume: 4,  
+
+            speed: 0.2  
+        }  
+    });  
+}
+
+);
+
+// ============================================================
+// UNKNOWN ROUTES
+// ============================================================
+
+app.use(
+(req, res) => {
+return blocked(res);
+}
+);
+
+// ============================================================
+// ERROR HANDLER
+// ============================================================
+
+app.use(
+(err, req, res, next) => {
+
+console.error(  
+        "[LEXINX ERROR]",  
+        err.message  
+    );  
+
+    return blocked(res);  
+}
+
+);
+
+// ============================================================
+// CLEANUP
+// ============================================================
 
 setInterval(() => {
 
-    const now =
-        Date.now();
+const t = now();  
 
-    for (
-        const [
-            nonce,
-            time
-        ] of usedNonces
-    ) {
+for (  
+    const [nonce, created]  
+    of nonces  
+) {  
+    if (  
+        t - created >  
+        NONCE_TTL  
+    ) {  
+        nonces.delete(nonce);  
+    }  
+}  
 
-        if (
-            now - time >
-            120000
-        ) {
+for (  
+    const [session, data]  
+    of sessions  
+) {  
+    if (  
+        data.expires <= t  
+    ) {  
+        sessions.delete(session);  
+    }  
+}  
 
-            usedNonces.delete(
-                nonce
-            );
-        }
-    }
+for (  
+    const [ip, state]  
+    of clients  
+) {  
+    if (  
+        state.lockedUntil < t &&  
+        t - state.window >  
+            RATE_WINDOW * 10  
+    ) {  
+        clients.delete(ip);  
+    }  
+}
 
-}, 30000);
+}, 30_000);
 
-
-// ======================================
-// BLOCK UNKNOWN ROUTES
-// ======================================
-
-app.use(
-    (req, res) => {
-
-        res
-            .status(403)
-            .type("text")
-            .send(
-                "Blocked by LEXINX v50 protection"
-            );
-    }
-);
-
-
-// ======================================
+// ============================================================
 // START
-// ======================================
+// ============================================================
 
 app.listen(
-    PORT,
-    () => {
+PORT,
+() => {
 
-        console.log(
-            "LEXINX V50 API online"
-        );
-    }
+console.log(  
+        `[LEXINX ${VERSION}] ONLINE`  
+    );  
+}
+
 );
