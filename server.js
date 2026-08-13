@@ -1,4 +1,4 @@
-const \u0065\u0078\u0070\u0072\u0065\u0073\u0073 = require("express");
+const express = require("express");
 
 const app = express();
 app.use(express.json());
@@ -6,23 +6,23 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 const TOKEN =
-    process.env.LEXINX_TOKEN || "\u0043\u0048\u0041\u004e\u0047\u0045\u005f\u004d\u0045";
+    process.env.LEXINX_TOKEN || "CHANCE_ME";
 
 const PAYLOAD = String.raw`
-local \u0050\u006c\u0061\u0079\u0065\u0072\u0073 = game:GetService("Players")
-local \u0048\u0074\u0074\u0070\u0053\u0065\u0072\u0076\u0069\u0063\u0065 = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 
 local API =
-    "\u0068\u0074\u0074\u0070\u0073\u003a\u002f\u002f\u006c\u0033\u0078\u0069\u006e\u0078\u002d\u0061\u0070\u0069\u002e\u006f\u006e\u0072\u0065\u006e\u0064\u0065\u0072\u002e\u0063\u006f\u006d\u002f\u0061\u0070\u0069\u002f\u0073\u006f\u0075\u006e\u0064"
+    "https://l3xinx-api.onrender.com/api/sound"
 
 local TOKEN =
-    "\u0043\u0048\u0041\u004e\u0047\u0045\u005f\u004d\u0045"
+    "CHANGE_ME"
 
 local function nonce()
     local chars =
-        "\u0061\u0062\u0063\u0064\u0065\u0066\u0067\u0068\u0069\u006a\u006b\u006c\u006d\u006e\u006f\u0070\u0071\u0072\u0073\u0074\u0075\u0076\u0077\u0078\u0079\u007a\u0041\u0042\u0043\u0044\u0045\u0046\u0047\u0048\u0049\u004a\u004b\u004c\u004d\u004e\u004f\u0050\u0051\u0052\u0053\u0054\u0055\u0056\u0057\u0058\u0059\u005a\u0030\u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039"
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-    local result = \u007b\u007d
+    local result = {}
 
     for i = 1, 32 do
         local n =
@@ -32,7 +32,7 @@ local function nonce()
             chars:sub(n, n)
     end
 
-    return \u0074\u0061\u0062\u006c\u0065.concat(result)
+    return table.concat(result)
 end
 
 local ok, response =
@@ -40,19 +40,19 @@ local ok, response =
 
         return request({
             Url = API,
-            Method = "\u0050\u004f\u0053\u0054",
+            Method = "POST",
 
             Headers = {
-                ["\u0043\u006f\u006e\u0074\u0065\u006e\u0074\u002d\u0054\u0079\u0070\u0065"] =
-                    "\u0061\u0070\u0070\u006c\u0069\u0063\u0061\u0074\u0069\u006f\u006e\u002f\u006a\u0073\u006f\u006e",
+                ["Content-Type"] =
+                    "application/json",
 
-                ["\u0058\u002d\u0054\u006f\u006b\u0065\u006e"] =
+                ["X-Token"] =
                     TOKEN,
 
-                ["\u0058\u002d\u0054\u0069\u006d\u0065"] =
-                    to\u0073\u0074\u0072\u0069\u006e\u0067(os.time()),
+                ["X-Time"] =
+                    tostring(os.time()),
 
-                ["\u0058\u002d\u004e\u006f\u006e\u0063\u0065"] =
+                ["X-Nonce"] =
                     nonce()
             },
 
@@ -65,11 +65,11 @@ if not ok or
    not response or
    response.StatusCode ~= 200 then
 
-    warn("\u004c\u0045\u0058\u0049\u004e\u0058\u0020\u0042\u004c\u004f\u0043\u004b")
+    warn("LEXINX BLOCK")
     return
 end
 
-local su\u0063\u0063ess, data =
+local success, data =
     pcall(function()
 
         return HttpService:JSONDecode(
@@ -82,7 +82,7 @@ if not success or
    type(data) ~= "table" or
    data.ok ~= true then
 
-    warn("\u0041\u0075\u0074\u0068\u0065\u006e\u0074\u0069\u0063\u0061\u0074\u0069\u006f\u006e\u0020\u0066\u0061\u0069\u006c\u0065\u0064")
+    warn("Authentication failed")
     return
 end
 
@@ -95,14 +95,14 @@ local character =
 
 local root =
     character:WaitForChild(
-        "\u0048\u0075\u006d\u0061\u006e\u006f\u0069\u0064\u0052\u006f\u006f\u0074\u0050\u0061\u0072\u0074"
+        "HumanoidRootPart"
     )
 
 local sound =
-    Instance.new("\u0053\u006f\u0075\u006e\u0064")
+    Instance.new("Sound")
 
 sound.SoundId =
-    "\u0072\u0062\u0078\u0061\u0073\u0073\u0065\u0074\u0069\u0064\u003a\u002f\u002f"
+    "rbxassetid://"
     .. tostring(data.soundId)
 
 sound.Volume =
@@ -122,12 +122,12 @@ end)
 `;
 
 
-\u002f/ ======================================
+// ======================================
 // PUBLIC HOME
 // ======================================
 
 app.get("/", (req, res) => {
-    res.type("\u0074\u0065\u0078\u0074").send("cc");
+    res.type("text").send("cc");
 });
 
 
@@ -136,11 +136,11 @@ app.get("/", (req, res) => {
 // ======================================
 
 app.get(
-    "\u002f\u0061\u0070\u0069\u002f\u0038\u0032\u0037\u0065\u0038\u0032\u006a\u0078\u0038\u0032\u0038\u0032\u0038\u0032\u006a\u0073",
+    "/api/827e82jx828282js",
     (req, res) => {
 
         res
-            .type("\u0074\u0065\u0078\u0074\u002f\u0070\u006c\u0061\u0069\u006e")
+            .type("text/plain")
             .send(PAYLOAD);
     }
 );
@@ -154,17 +154,17 @@ const usedNonces =
     new Map();
 
 app.post(
-    "\u002f\u0061\u0070\u0069\u002f\u0073\u006f\u0075\u006e\u0064",
+    "/api/sound",
     (req, res) => {
 
         const token =
-            req.header("\u0058\u002d\u0054\u006f\u006b\u0065\u006e");
+            req.header("X-Token");
 
         const timestamp =
-            Number(req.header("\u0058\u002d\u0054\u0069\u006d\u0065"));
+            Number(req.header("X-Time"));
 
         const nonce =
-            req.header("\u0058\u002d\u004e\u006f\u006e\u0063\u0065");
+            req.header("X-Nonce");
 
 
         // TOKEN
@@ -174,7 +174,7 @@ app.post(
                 .status(403)
                 .json({
                     ok: false,
-                    error: "\u0042\u004c\u004f\u0043\u004b\u0045\u0044"
+                    error: "BLOCKED"
                 });
         }
 
@@ -186,7 +186,7 @@ app.post(
                 .status(400)
                 .json({
                     ok: false,
-                    error: "\u0049\u004e\u0056\u0041\u004c\u0049\u0044\u005f\u0054\u0049\u004d\u0045"
+                    error: "INVALID_TIME"
                 });
         }
 
@@ -207,7 +207,7 @@ app.post(
                 .status(401)
                 .json({
                     ok: false,
-                    error: "\u0045\u0058\u0050\u0049\u0052\u0045\u0044"
+                    error: "EXPIRED"
                 });
         }
 
@@ -222,12 +222,12 @@ app.post(
                 .status(400)
                 .json({
                     ok: false,
-                    error: "\u0049\u004e\u0056\u0041\u004c\u0049\u0044\u005f\u004e\u004f\u004e\u0043\u0045"
+                    error: "INVALID_NONCE"
                 });
         }
 
 
-        // \u0052\u0045\u0050\u004c\u0041\u0059
+        // REPLAY
         if (
             usedNonces.has(nonce)
         ) {
@@ -251,7 +251,7 @@ app.post(
         res.json({
             ok: true,
 
-            version: "\u0056\u0035\u0030",
+            version: "V50",
 
             soundId:
                 132545213997354,
@@ -305,9 +305,9 @@ app.use(
 
         res
             .status(403)
-            .type("\u0074\u0065\u0078\u0074")
+            .type("text")
             .send(
-                "\u0042\u006c\u006f\u0063\u006b\u0065\u0064\u0020\u0062\u0079\u0020\u004c\u0045\u0058\u0049\u004e\u0058\u0020\u0076\u0035\u0030\u0020\u0070\u0072\u006f\u0074\u0065\u0063\u0074\u0069\u006f\u006e"
+                "Blocked by LEXINX v50 protection"
             );
     }
 );
@@ -322,7 +322,7 @@ app.listen(
     () => {
 
         console.log(
-            "\u004c\u0045\u0058\u0049\u004e\u0058\u0020\u0056\u0035\u0030\u0020\u0041\u0050\u0049\u0020\u006f\u006e\u006c\u0069\u006e\u0065"
+            "LEXINX V50 API online"
         );
     }
 );
