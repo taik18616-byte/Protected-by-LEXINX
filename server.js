@@ -6,32 +6,96 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
-app.use(express.json({ limit: "1kb", strict: true }));
+app.use(express.json({
+    limit: "2kb",
+    strict: true
+}));
 
 const PORT = process.env.PORT || 3000;
 
-const TOKEN = process.env.LEXINX_TOKEN;
+const TOKEN =
+    process.env.LEXINX_TOKEN || "CHANGE_ME";
+
 const VERSION = "V50";
 
-if (!TOKEN) {
-    throw new Error("LEXINX_TOKEN is missing");
+const NONCE_TTL = 60_000;
+const SESSION_TTL = 30_000;
+
+const RATE_WINDOW = 60_000;
+const MAX_REQUESTS = 20;
+const MAX_FAILURES = 5;
+const LOCK_TIME = 300_000;
+
+const nonces = new Map();
+const sessions = new Map();
+const clients = new Map();
+
+
+// ============================================================
+// FAKE / DECOY PAYLOADS
+// ============================================================
+
+const DECOYS = [
+    {
+        id: "payload_001",
+        version: "V49",
+        ok: false,
+        payload: "INVALID",
+        checksum: "00000000"
+    },
+
+    {
+        id: "payload_002",
+        version: "V48",
+        ok: false,
+        payload: null,
+        checksum: "FFFFFFFF"
+    },
+
+    {
+        id: "payload_003",
+        version: "TEST",
+        ok: false,
+        payload: "DECOY_PAYLOAD",
+        checksum: "12345678"
+    },
+
+    {
+        id: "payload_004",
+        version: "DEBUG",
+        ok: false,
+        payload: "DISABLED",
+        checksum: "AAAAAAAA"
+    },
+
+    {
+        id: "payload_005",
+        version: "V00",
+        ok: false,
+        payload: "BLOCKED",
+        checksum: "BBBBBBBB"
+    },
+
+    {
+        id: "payload_006",
+        version: "FAKE",
+        ok: false,
+        payload: "NOT_AUTHORIZED",
+        checksum: "CCCCCCCC"
+    }
+];
+
+
+// ============================================================
+// UTILS
+// ============================================================
+
+function now() {
+    return Date.now();
 }
 
-const WINDOW = 60_000;
-const MAX_REQUESTS = 10;
-const MAX_FAILURES = 3;
-const LOCK_TIME = 10 * 60_000;
-const CLOCK_SKEW = 30;
-const NONCE_TTL = 120_000;
-
-const clients = new Map();
-const nonces = new Map();
-
-function reject(res) {
-    return res
-        .status(403)
-        .type("text")
-        .send("Blocked by LEXINX v50 protection");
+function unix() {
+    return Math.floor(now() / 1000);
 }
 
 function getIP(req) {
@@ -44,231 +108,743 @@ function getIP(req) {
     );
 }
 
-function state(ip) {
-    if (!clients.has(ip)) {
-        clients.set(ip, {
-            window: Date.now(),
+function blocked(res) {
+    return res
+        .status(403)
+        .type("text/plain")
+        .send("Blocked by LEXINX v50 protection");
+}
+
+function getClient(ip) {
+
+    let client = clients.get(ip);
+
+    if (!client) {
+
+        client = {
+            windowStart: now(),
             requests: 0,
             failures: 0,
             lockedUntil: 0
-        });
+        };
+
+        clients.set(ip, client);
     }
 
-    return clients.get(ip);
+    return client;
 }
 
-function allowed(req) {
-    const s = state(getIP(req));
-    const t = Date.now();
 
-    if (s.lockedUntil > t) {
+// ============================================================
+// RATE LIMIT
+// ============================================================
+
+function checkRate(req) {
+
+    const client =
+        getClient(getIP(req));
+
+    if (
+        client.lockedUntil >
+        now()
+    ) {
         return false;
     }
 
-    if (t - s.window > WINDOW) {
-        s.window = t;
-        s.requests = 0;
+    if (
+        now() -
+        client.windowStart >
+        RATE_WINDOW
+    ) {
+
+        client.windowStart = now();
+        client.requests = 0;
     }
 
-    s.requests++;
+    client.requests++;
 
-    if (s.requests > MAX_REQUESTS) {
-        s.lockedUntil = t + LOCK_TIME;
+    if (
+        client.requests >
+        MAX_REQUESTS
+    ) {
+
+        client.lockedUntil =
+            now() + LOCK_TIME;
+
         return false;
     }
 
     return true;
 }
 
-function fail(req) {
-    const s = state(getIP(req));
 
-    s.failures++;
+// ============================================================
+// FAILURE
+// ============================================================
 
-    if (s.failures >= MAX_FAILURES) {
-        s.lockedUntil =
-            Date.now() + LOCK_TIME;
+function registerFailure(req) {
+
+    const client =
+        getClient(getIP(req));
+
+    client.failures++;
+
+    if (
+        client.failures >=
+        MAX_FAILURES
+    ) {
+
+        client.lockedUntil =
+            now() + LOCK_TIME;
     }
 }
 
-function validToken(value) {
-    if (typeof value !== "string") {
+
+// ============================================================
+// TOKEN
+// ============================================================
+
+function validToken(token) {
+
+    if (
+        typeof token !==
+        "string"
+    ) {
         return false;
     }
 
-    const a = Buffer.from(TOKEN);
-    const b = Buffer.from(value);
+    const expected =
+        Buffer.from(TOKEN);
+
+    const supplied =
+        Buffer.from(token);
+
+    if (
+        expected.length !==
+        supplied.length
+    ) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(
+        expected,
+        supplied
+    );
+}
+
+
+// ============================================================
+// NONCE
+// ============================================================
+
+function validNonce(nonce) {
 
     return (
-        a.length === b.length &&
-        crypto.timingSafeEqual(a, b)
+        typeof nonce ===
+            "string" &&
+        /^[A-Za-z0-9]{32}$/
+            .test(nonce)
     );
 }
 
-function cleanup() {
-    const t = Date.now();
 
-    for (const [nonce, created] of nonces) {
-        if (t - created > NONCE_TTL) {
-            nonces.delete(nonce);
-        }
-    }
+// ============================================================
+// SECURITY HEADERS
+// ============================================================
 
-    for (const [ip, s] of clients) {
-        if (
-            t - s.window > 600_000 &&
-            s.lockedUntil < t
-        ) {
-            clients.delete(ip);
-        }
-    }
-}
+app.use((req, res, next) => {
 
-setInterval(cleanup, 30_000);
+    res.setHeader(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate"
+    );
 
-// ===============================
+    res.setHeader(
+        "Pragma",
+        "no-cache"
+    );
+
+    res.setHeader(
+        "X-Content-Type-Options",
+        "nosniff"
+    );
+
+    next();
+});
+
+
+// ============================================================
 // HOME
-// ===============================
+// ============================================================
 
 app.get("/", (req, res) => {
-    res.type("text").send("cc");
+
+    res
+        .type("text/plain")
+        .send("cc");
 });
 
-// ===============================
-// BLOCK DIRECT GET
-// ===============================
 
-app.get("/api/sound", (req, res) => {
-    reject(res);
-});
+// ============================================================
+// FAKE ENDPOINTS
+// ============================================================
 
-app.head("/api/sound", (req, res) => {
-    reject(res);
-});
+app.get(
+    "/api/test",
+    (req, res) => {
 
-// ===============================
-// AUTH API
-// ===============================
-
-app.post("/api/sound", (req, res) => {
-
-    if (!allowed(req)) {
-        return reject(res);
+        return res.json(
+            DECOYS[0]
+        );
     }
+);
 
-    const contentType =
-        req.headers["content-type"] || "";
+app.get(
+    "/api/debug",
+    (req, res) => {
 
-    if (
-        !contentType
-            .toLowerCase()
-            .startsWith("application/json")
+        return res.json(
+            DECOYS[1]
+        );
+    }
+);
+
+app.get(
+    "/api/version",
+    (req, res) => {
+
+        return res.json(
+            DECOYS[2]
+        );
+    }
+);
+
+app.get(
+    "/api/payload",
+    (req, res) => {
+
+        return res.json(
+            DECOYS[3]
+        );
+    }
+);
+
+app.get(
+    "/api/legacy",
+    (req, res) => {
+
+        return res.json(
+            DECOYS[4]
+        );
+    }
+);
+
+
+// ============================================================
+// REAL LOADER
+// ============================================================
+
+app.get(
+    "/api/66667777",
+    (req, res) => {
+
+        const bootstrap = `
+local HttpService = game:GetService("HttpService")
+
+local API =
+    "https://YOUR-DOMAIN/api/session"
+
+local VERSION = "V50"
+
+local function nonce()
+
+    local chars =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    local result = {}
+
+    for i = 1, 32 do
+
+        local n =
+            math.random(
+                1,
+                #chars
+            )
+
+        result[i] =
+            chars:sub(
+                n,
+                n
+            )
+    end
+
+    return table.concat(result)
+end
+
+local response =
+    request({
+
+        Url = API,
+
+        Method = "POST",
+
+        Headers = {
+
+            ["Content-Type"] =
+                "application/json",
+
+            ["X-Time"] =
+                tostring(
+                    os.time()
+                ),
+
+            ["X-Nonce"] =
+                nonce(),
+
+            ["X-Version"] =
+                VERSION
+        },
+
+        Body = "{}"
+    })
+
+if not response or
+   response.StatusCode ~= 200 then
+
+    warn("[LEXINX] BLOCK")
+    return
+end
+
+local ok, data =
+    pcall(function()
+
+        return HttpService:JSONDecode(
+            response.Body
+        )
+
+    end)
+
+if not ok or
+   type(data) ~= "table" or
+   data.ok ~= true then
+
+    warn("[LEXINX] Authentication failed")
+    return
+end
+
+if data.version ~= VERSION then
+
+    warn("[LEXINX] Version mismatch")
+    return
+end
+
+print(
+    "[LEXINX] Authorized"
+)
+`;
+
+        res
+            .status(200)
+            .type("text/plain")
+            .send(bootstrap);
+    }
+);
+
+
+// ============================================================
+// SESSION
+// ============================================================
+
+app.get(
+    "/api/session",
+    (req, res) => {
+
+        return blocked(res);
+    }
+);
+
+
+app.post(
+    "/api/session",
+    (req, res) => {
+
+        // RATE LIMIT
+
+        if (!checkRate(req)) {
+            return blocked(res);
+        }
+
+
+        // CONTENT TYPE
+
+        const contentType =
+            req.headers[
+                "content-type"
+            ] || "";
+
+        if (
+            !contentType
+                .toLowerCase()
+                .startsWith(
+                    "application/json"
+                )
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+
+        // HEADERS
+
+        const timestamp =
+            req.header("X-Time");
+
+        const nonce =
+            req.header("X-Nonce");
+
+        const version =
+            req.header("X-Version");
+
+
+        if (
+            !timestamp ||
+            !nonce ||
+            !version
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+
+        // VERSION
+
+        if (
+            version !== VERSION
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+
+        // TIMESTAMP
+
+        if (
+            !/^\d{10}$/
+                .test(timestamp)
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+        const clientTime =
+            Number(timestamp);
+
+        if (
+            !Number.isSafeInteger(
+                clientTime
+            )
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+        if (
+            Math.abs(
+                unix() -
+                clientTime
+            ) > 30
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+
+        // NONCE
+
+        if (
+            !validNonce(nonce)
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+
+        // REPLAY
+
+        if (
+            nonces.has(nonce)
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+        nonces.set(
+            nonce,
+            now()
+        );
+
+
+        // BODY
+
+        if (
+            !req.body ||
+            typeof req.body !==
+                "object" ||
+            Array.isArray(
+                req.body
+            ) ||
+            Object.keys(
+                req.body
+            ).length !== 0
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+
+        // ====================================================
+        // SESSION
+        // ====================================================
+
+        const session =
+            crypto
+                .randomBytes(32)
+                .toString("hex");
+
+        sessions.set(
+            session,
+            {
+                created: now(),
+
+                expires:
+                    now() +
+                    SESSION_TTL,
+
+                version: VERSION
+            }
+        );
+
+
+        // ====================================================
+        // REAL JSON PAYLOAD
+        // ====================================================
+
+        return res
+            .status(200)
+            .json({
+
+                ok: true,
+
+                version: VERSION,
+
+                session: session,
+
+                expiresIn:
+                    SESSION_TTL,
+
+                config: {
+
+                    soundId:
+                        132545213997354,
+
+                    volume:
+                        4,
+
+                    speed:
+                        0.2
+                }
+            });
+    }
+);
+
+
+// ============================================================
+// SESSION CONFIG
+// ============================================================
+
+app.post(
+    "/api/config",
+    (req, res) => {
+
+        if (!checkRate(req)) {
+            return blocked(res);
+        }
+
+        const session =
+            req.header(
+                "X-Session"
+            );
+
+        if (
+            typeof session !==
+            "string"
+        ) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+        const data =
+            sessions.get(
+                session
+            );
+
+        if (!data) {
+
+            registerFailure(req);
+
+            return blocked(res);
+        }
+
+        if (
+            data.expires <
+            now()
+        ) {
+
+            sessions.delete(
+                session
+            );
+
+            return blocked(res);
+        }
+
+        if (
+            data.version !==
+            VERSION
+        ) {
+
+            return blocked(res);
+        }
+
+        return res.json({
+
+            ok: true,
+
+            version: VERSION,
+
+            config: {
+
+                soundId:
+                    132545213997354,
+
+                volume:
+                    4,
+
+                speed:
+                    0.2
+            }
+        });
+    }
+);
+
+
+// ============================================================
+// CLEANUP
+// ============================================================
+
+setInterval(() => {
+
+    const current =
+        now();
+
+    for (
+        const [
+            nonce,
+            created
+        ] of nonces
     ) {
-        fail(req);
-        return reject(res);
+
+        if (
+            current -
+            created >
+            NONCE_TTL
+        ) {
+
+            nonces.delete(
+                nonce
+            );
+        }
     }
 
-    const token =
-        req.header("X-Token");
-
-    const time =
-        req.header("X-Time");
-
-    const nonce =
-        req.header("X-Nonce");
-
-    const version =
-        req.header("X-Version");
-
-    if (
-        !token ||
-        !time ||
-        !nonce ||
-        !version
+    for (
+        const [
+            session,
+            data
+        ] of sessions
     ) {
-        fail(req);
-        return reject(res);
+
+        if (
+            data.expires <
+            current
+        ) {
+
+            sessions.delete(
+                session
+            );
+        }
     }
 
-    if (!validToken(token)) {
-        fail(req);
-        return reject(res);
-    }
+}, 30_000);
 
-    if (version !== VERSION) {
-        fail(req);
-        return reject(res);
-    }
 
-    if (!/^\d{10}$/.test(time)) {
-        fail(req);
-        return reject(res);
-    }
-
-    const timestamp = Number(time);
-
-    if (
-        Math.abs(
-            Math.floor(Date.now() / 1000) -
-            timestamp
-        ) > CLOCK_SKEW
-    ) {
-        fail(req);
-        return reject(res);
-    }
-
-    if (!/^[A-Za-z0-9]{32}$/.test(nonce)) {
-        fail(req);
-        return reject(res);
-    }
-
-    if (nonces.has(nonce)) {
-        fail(req);
-        return reject(res);
-    }
-
-    nonces.set(nonce, Date.now());
-
-    if (
-        !req.body ||
-        typeof req.body !== "object" ||
-        Array.isArray(req.body) ||
-        Object.keys(req.body).length !== 0
-    ) {
-        fail(req);
-        return reject(res);
-    }
-
-    // ===========================
-    // AUTHORIZED
-    // ===========================
-
-    const session =
-        crypto.randomBytes(24).toString("hex");
-
-    return res.json({
-        ok: true,
-        version: VERSION,
-        session,
-        expires: 30,
-
-        // Chỉ trả dữ liệu cần thiết.
-        soundId: 132545213997354,
-        volume: 4,
-        speed: 0.2
-    });
-});
-
-// ===============================
+// ============================================================
 // UNKNOWN ROUTES
-// ===============================
+// ============================================================
 
-app.use((req, res) => {
-    reject(res);
-});
+app.use(
+    (req, res) => {
 
-app.listen(PORT, () => {
-    console.log(
-        `[LEXINX V50] Online :${PORT}`
-    );
-});
+        return blocked(res);
+    }
+);
+
+
+// ============================================================
+// ERROR HANDLER
+// ============================================================
+
+app.use(
+    (err, req, res, next) => {
+
+        console.error(
+            "[LEXINX ERROR]",
+            err.message
+        );
+
+        return blocked(res);
+    }
+);
+
+
+// ============================================================
+// START
+// ============================================================
+
+app.listen(
+    PORT,
+    () => {
+
+        console.log(
+            `[LEXINX ${VERSION}] ONLINE`
+        );
+    }
+);
